@@ -7,8 +7,8 @@ plugins {
     id("com.github.johnrengelman.shadow") version "8.1.1"
 }
 
-group = "com.moulberry.com.moulberry.axiom"
-version = "1.0.0-SNAPSHOT"
+group = "com.moulberry.axiom"
+version = "1.1.0.1"
 description = "Serverside component for Axiom on Paper"
 
 java {
