@@ -7,8 +7,8 @@ plugins {
     id("com.github.johnrengelman.shadow") version "8.1.1"
 }
 
-group = "com.moulberry.com.moulberry.axiom"
-version = "1.0.0-SNAPSHOT"
+group = "com.moulberry.axiom"
+version = "1.2.1"
 description = "Serverside component for Axiom on Paper"
 
 java {
@@ -17,13 +17,27 @@ java {
 }
 
 repositories {
+    mavenCentral()
     maven("https://s01.oss.sonatype.org/content/repositories/snapshots/")
     maven("https://jitpack.io")
+    maven("https://maven.enginehub.org/repo/")
+    maven("https://repo.papermc.io/repository/maven-public/")
 }
 
 dependencies {
     paperweight.paperDevBundle("1.20.1-R0.1-SNAPSHOT")
     implementation("xyz.jpenilla:reflection-remapper:0.1.0-SNAPSHOT")
+
+    // Zstd Compression Library
+    implementation("com.github.luben:zstd-jni:1.5.5-4")
+
+    // WorldGuard support
+    compileOnly("com.sk89q.worldguard:worldguard-bukkit:7.1.0-SNAPSHOT")
+
+    // PlotSquared support
+    implementation(platform("com.intellectualsites.bom:bom-newest:1.37"))
+    compileOnly("com.intellectualsites.plotsquared:plotsquared-core")
+    compileOnly("com.intellectualsites.plotsquared:plotsquared-bukkit") { isTransitive = false }
 }
 
 tasks {

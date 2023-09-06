@@ -27,9 +27,9 @@ public class AxiomBigPayloadHandler extends ByteToMessageDecoder {
     @Override
     protected void decode(ChannelHandlerContext ctx, ByteBuf in, List<Object> out) throws Exception {
         try {
+            int readerIndex = in.readerIndex();
             int i = in.readableBytes();
             if (i != 0) {
-                int readerIndex = in.readerIndex();
                 FriendlyByteBuf buf = new FriendlyByteBuf(in);
                 int packetId = buf.readVarInt();
 
@@ -38,13 +38,14 @@ public class AxiomBigPayloadHandler extends ByteToMessageDecoder {
                     if (identifier.equals(SET_BUFFER)) {
                         ServerPlayer player = connection.getPlayer();
                         if (player != null && player.getBukkitEntity().hasPermission("axiom.*")) {
-                            listener.onReceive(player, buf);
-                            return;
+                            if (listener.onReceive(player, buf)) {
+                                return;
+                            }
                         }
                     }
                 }
-                in.readerIndex(readerIndex);
             }
+            in.readerIndex(readerIndex);
         } catch (Exception e) {
             e.printStackTrace();
         }

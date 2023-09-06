@@ -3,8 +3,26 @@ package com.moulberry.axiom.packet;
 import com.moulberry.axiom.AxiomPaper;
 import com.moulberry.axiom.buffer.BiomeBuffer;
 import com.moulberry.axiom.buffer.BlockBuffer;
+import com.moulberry.axiom.buffer.CompressedBlockEntity;
+import com.moulberry.axiom.event.AxiomModifyWorldEvent;
+import com.moulberry.axiom.integration.RegionProtection;
+import com.sk89q.worldedit.bukkit.BukkitAdapter;
+import com.sk89q.worldedit.math.BlockVector3;
+import com.sk89q.worldedit.world.World;
+import com.sk89q.worldguard.LocalPlayer;
+import com.sk89q.worldguard.WorldGuard;
+import com.sk89q.worldguard.bukkit.WorldGuardPlugin;
+import com.sk89q.worldguard.protection.ApplicableRegionSet;
+import com.sk89q.worldguard.protection.flags.Flags;
+import com.sk89q.worldguard.protection.flags.StateFlag;
+import com.sk89q.worldguard.protection.managers.RegionManager;
+import com.sk89q.worldguard.protection.regions.ProtectedCuboidRegion;
+import com.sk89q.worldguard.protection.regions.ProtectedRegion;
+import com.sk89q.worldguard.protection.regions.RegionContainer;
+import com.sk89q.worldguard.protection.regions.RegionQuery;
 import io.netty.buffer.Unpooled;
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
+import it.unimi.dsi.fastutil.shorts.Short2ObjectMap;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Holder;
 import net.minecraft.core.Registry;
@@ -29,6 +47,9 @@ import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.PalettedContainer;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.lighting.LightEngine;
+import org.bukkit.Bukkit;
+import org.bukkit.NamespacedKey;
+import org.bukkit.craftbukkit.v1_20_R1.CraftWorld;
 import org.bukkit.craftbukkit.v1_20_R1.entity.CraftPlayer;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.messaging.PluginMessageListener;
@@ -59,9 +80,9 @@ public class SetBlockBufferPacketListener {
         }
     }
 
-    public void onReceive(ServerPlayer player, FriendlyByteBuf friendlyByteBuf) {
+    public boolean onReceive(ServerPlayer player, FriendlyByteBuf friendlyByteBuf) {
         MinecraftServer server = player.getServer();
-        if (server == null) return;
+        if (server == null) return false;
 
         ResourceKey<Level> worldKey = friendlyByteBuf.readResourceKey(Registries.DIMENSION);
         friendlyByteBuf.readUUID(); // Discard, we don't need to associate buffers
@@ -74,20 +95,30 @@ public class SetBlockBufferPacketListener {
         byte type = friendlyByteBuf.readByte();
         if (type == 0) {
             BlockBuffer buffer = BlockBuffer.load(friendlyByteBuf);
-            applyBlockBuffer(server, buffer, worldKey);
+            applyBlockBuffer(player, server, buffer, worldKey);
         } else if (type == 1) {
             BiomeBuffer buffer = BiomeBuffer.load(friendlyByteBuf);
             applyBiomeBuffer(server, buffer, worldKey);
         } else {
             throw new RuntimeException("Unknown buffer type: " + type);
         }
+
+        return true;
     }
 
-    private void applyBlockBuffer(MinecraftServer server, BlockBuffer buffer, ResourceKey<Level> worldKey) {
+    private void applyBlockBuffer(ServerPlayer player, MinecraftServer server, BlockBuffer buffer, ResourceKey<Level> worldKey) {
         server.execute(() -> {
             ServerLevel world = server.getLevel(worldKey);
             if (world == null) return;
 
+            // Call AxiomModifyWorldEvent event
+            AxiomModifyWorldEvent modifyWorldEvent = new AxiomModifyWorldEvent(player.getBukkitEntity(), world.getWorld());
+            Bukkit.getPluginManager().callEvent(modifyWorldEvent);
+            if (modifyWorldEvent.isCancelled()) return;
+
+            RegionProtection regionProtection = new RegionProtection(player.getBukkitEntity(), world.getWorld());
+
+            // Allowed, apply buffer
             BlockPos.MutableBlockPos blockPos = new BlockPos.MutableBlockPos();
 
             var lightEngine = world.getChunkSource().getLightEngine();
@@ -101,6 +132,10 @@ public class SetBlockBufferPacketListener {
                 PalettedContainer<BlockState> container = entry.getValue();
 
                 if (cy < world.getMinSection() || cy >= world.getMaxSection()) {
+                    continue;
+                }
+
+                if (!regionProtection.canBuildInSection(cx, cy, cz)) {
                     continue;
                 }
 
@@ -124,6 +159,8 @@ public class SetBlockBufferPacketListener {
                         default -> {}
                     }
                 }
+
+                Short2ObjectMap<CompressedBlockEntity> blockEntityChunkMap = buffer.getBlockEntityChunkMap(entry.getLongKey());
 
                 sectionStates.acquire();
                 try {
@@ -159,26 +196,41 @@ public class SetBlockBufferPacketListener {
                                         }
                                     }
 
-                                    boolean oldHasBlockEntity = old.hasBlockEntity();
-                                    if (old.is(block)) {
-                                        if (blockState.hasBlockEntity()) {
-                                            BlockEntity blockEntity = chunk.getBlockEntity(blockPos, LevelChunk.EntityCreationType.CHECK);
-                                            if (blockEntity == null) {
-                                                blockEntity = ((EntityBlock)block).newBlockEntity(blockPos, blockState);
-                                                if (blockEntity != null) {
-                                                    chunk.addAndRegisterBlockEntity(blockEntity);
-                                                }
-                                            } else {
-                                                blockEntity.setBlockState(blockState);
+                                    if (blockState.hasBlockEntity()) {
+                                        BlockEntity blockEntity = chunk.getBlockEntity(blockPos, LevelChunk.EntityCreationType.CHECK);
 
-                                                try {
-                                                    this.updateBlockEntityTicker.invoke(chunk, blockEntity);
-                                                } catch (IllegalAccessException | InvocationTargetException e) {
-                                                    throw new RuntimeException(e);
-                                                }
+                                        if (blockEntity == null) {
+                                            // There isn't a block entity here, create it!
+                                            blockEntity = ((EntityBlock)block).newBlockEntity(blockPos, blockState);
+                                            if (blockEntity != null) {
+                                                chunk.addAndRegisterBlockEntity(blockEntity);
+                                            }
+                                        } else if (blockEntity.getType().isValid(blockState)) {
+                                            // Block entity is here and the type is correct
+                                            blockEntity.setBlockState(blockState);
+
+                                            try {
+                                                this.updateBlockEntityTicker.invoke(chunk, blockEntity);
+                                            } catch (IllegalAccessException | InvocationTargetException e) {
+                                                throw new RuntimeException(e);
+                                            }
+                                        } else {
+                                            // Block entity type isn't correct, we need to recreate it
+                                            chunk.removeBlockEntity(blockPos);
+
+                                            blockEntity = ((EntityBlock)block).newBlockEntity(blockPos, blockState);
+                                            if (blockEntity != null) {
+                                                chunk.addAndRegisterBlockEntity(blockEntity);
                                             }
                                         }
-                                    } else if (oldHasBlockEntity) {
+                                        if (blockEntity != null && blockEntityChunkMap != null) {
+                                            int key = x | (y << 4) | (z << 8);
+                                            CompressedBlockEntity savedBlockEntity = blockEntityChunkMap.get((short) key);
+                                            if (savedBlockEntity != null) {
+                                                blockEntity.load(savedBlockEntity.decompress());
+                                            }
+                                        }
+                                    } else if (old.hasBlockEntity()) {
                                         chunk.removeBlockEntity(blockPos);
                                     }
 

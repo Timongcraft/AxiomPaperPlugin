@@ -1,6 +1,7 @@
 package com.moulberry.axiom.packet;
 
 import com.moulberry.axiom.AxiomPaper;
+import com.moulberry.axiom.event.AxiomModifyWorldEvent;
 import io.netty.buffer.Unpooled;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.SectionPos;
@@ -15,6 +16,7 @@ import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.lighting.LightEngine;
+import org.bukkit.Bukkit;
 import org.bukkit.craftbukkit.v1_20_R1.entity.CraftPlayer;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.messaging.PluginMessageListener;
@@ -52,6 +54,12 @@ public class SetBlockPacketListener implements PluginMessageListener {
             return;
         }
 
+        // Check if player is allowed to modify this world
+        AxiomModifyWorldEvent modifyWorldEvent = new AxiomModifyWorldEvent(bukkitPlayer, bukkitPlayer.getWorld());
+        Bukkit.getPluginManager().callEvent(modifyWorldEvent);
+        if (modifyWorldEvent.isCancelled()) return;
+
+        // Read packet
         FriendlyByteBuf friendlyByteBuf = new FriendlyByteBuf(Unpooled.wrappedBuffer(message));
         BlockPos blockPos = friendlyByteBuf.readBlockPos();
         BlockState blockState = friendlyByteBuf.readById(Block.BLOCK_STATE_REGISTRY);
@@ -60,6 +68,7 @@ public class SetBlockPacketListener implements PluginMessageListener {
 
         ServerPlayer player = ((CraftPlayer)bukkitPlayer).getHandle();
 
+        // Update blocks
         if (updateNeighbors) {
             player.level().setBlock(blockPos, blockState, 3);
         } else {
@@ -111,25 +120,23 @@ public class SetBlockPacketListener implements PluginMessageListener {
                         if (blockEntity != null) {
                             chunk.addAndRegisterBlockEntity(blockEntity);
                         }
+                    } else if (blockEntity.getType().isValid(blockState)) {
+                        // Block entity is here and the type is correct
+                        // Just update the state and ticker and move on
+                        blockEntity.setBlockState(blockState);
+
+                        try {
+                            this.updateBlockEntityTicker.invoke(chunk, blockEntity);
+                        } catch (IllegalAccessException | InvocationTargetException e) {
+                            throw new RuntimeException(e);
+                        }
                     } else {
-                        if (blockEntity.getType().isValid(blockState)) {
-                            // Block entity is here and the type is correct
-                            // Just update the state and ticker and move on
-                            blockEntity.setBlockState(blockState);
+                        // Block entity type isn't correct, we need to recreate it
+                        chunk.removeBlockEntity(blockPos);
 
-                            try {
-                                this.updateBlockEntityTicker.invoke(chunk, blockEntity);
-                            } catch (IllegalAccessException | InvocationTargetException e) {
-                                throw new RuntimeException(e);
-                            }
-                        } else {
-                            // Block entity type isn't correct, we need to recreate it
-                            chunk.removeBlockEntity(blockPos);
-
-                            blockEntity = ((EntityBlock)block).newBlockEntity(blockPos, blockState);
-                            if (blockEntity != null) {
-                                chunk.addAndRegisterBlockEntity(blockEntity);
-                            }
+                        blockEntity = ((EntityBlock)block).newBlockEntity(blockPos, blockState);
+                        if (blockEntity != null) {
+                            chunk.addAndRegisterBlockEntity(blockEntity);
                         }
                     }
                 } else if (old.hasBlockEntity()) {
