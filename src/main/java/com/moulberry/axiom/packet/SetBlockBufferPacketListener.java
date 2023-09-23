@@ -6,6 +6,7 @@ import com.moulberry.axiom.buffer.BlockBuffer;
 import com.moulberry.axiom.buffer.CompressedBlockEntity;
 import com.moulberry.axiom.event.AxiomModifyWorldEvent;
 import com.moulberry.axiom.integration.RegionProtection;
+import com.moulberry.axiom.integration.SectionProtection;
 import com.sk89q.worldedit.bukkit.BukkitAdapter;
 import com.sk89q.worldedit.math.BlockVector3;
 import com.sk89q.worldedit.world.World;
@@ -38,6 +39,7 @@ import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.EntityBlock;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
@@ -135,9 +137,14 @@ public class SetBlockBufferPacketListener {
                     continue;
                 }
 
-                if (!regionProtection.canBuildInSection(cx, cy, cz)) {
-                    continue;
-                }
+                SectionProtection sectionProtection = regionProtection.getSection(cx, cy, cz);
+//                switch (sectionProtection.getSectionState()) {
+//                    case ALLOW -> sectionProtection = null;
+//                    case DENY -> {
+//                        continue;
+//                    }
+//                    case CHECK -> {}
+//                }
 
                 LevelChunk chunk = world.getChunk(cx, cz);
                 chunk.setUnsaved(true);
@@ -162,89 +169,94 @@ public class SetBlockBufferPacketListener {
 
                 Short2ObjectMap<CompressedBlockEntity> blockEntityChunkMap = buffer.getBlockEntityChunkMap(entry.getLongKey());
 
-                sectionStates.acquire();
-                try {
-                    for (int x = 0; x < 16; x++) {
-                        for (int y = 0; y < 16; y++) {
-                            for (int z = 0; z < 16; z++) {
-                                BlockState blockState = container.get(x, y, z);
-                                if (blockState == emptyState) continue;
+                for (int x = 0; x < 16; x++) {
+                    for (int y = 0; y < 16; y++) {
+                        for (int z = 0; z < 16; z++) {
+                            BlockState blockState = container.get(x, y, z);
+                            if (blockState == emptyState) continue;
 
-                                int bx = cx*16 + x;
-                                int by = cy*16 + y;
-                                int bz = cz*16 + z;
+                            switch (sectionProtection.getSectionState()) {
+                                case ALLOW -> {}
+                                case DENY -> blockState = Blocks.REDSTONE_BLOCK.defaultBlockState();
+                                case CHECK -> blockState = Blocks.DIAMOND_BLOCK.defaultBlockState();
+                            }
 
-                                blockPos.set(bx, by, bz);
+                            int bx = cx*16 + x;
+                            int by = cy*16 + y;
+                            int bz = cz*16 + z;
 
-                                if (hasOnlyAir && blockState.isAir()) {
-                                    continue;
+//                          if (!regionProtection.canBuild(bx, by, bz)) {
+//                              continue;
+//                          }
+
+                            blockPos.set(bx, by, bz);
+
+                            if (hasOnlyAir && blockState.isAir()) {
+                                continue;
+                            }
+
+                            BlockState old = section.setBlockState(x, y, z, blockState, true);
+                            if (blockState != old) {
+                                Block block = blockState.getBlock();
+                                motionBlocking.update(x, by, z, blockState);
+                                motionBlockingNoLeaves.update(x, by, z, blockState);
+                                oceanFloor.update(x, by, z, blockState);
+                                worldSurface.update(x, by, z, blockState);
+
+                                if (false) { // Full update
+                                    old.onRemove(world, blockPos, blockState, false);
+
+                                    if (sectionStates.get(x, y, z).is(block)) {
+                                        blockState.onPlace(world, blockPos, old, false);
+                                    }
                                 }
 
-                                BlockState old = section.setBlockState(x, y, z, blockState, false);
-                                if (blockState != old) {
-                                    Block block = blockState.getBlock();
-                                    motionBlocking.update(x, by, z, blockState);
-                                    motionBlockingNoLeaves.update(x, by, z, blockState);
-                                    oceanFloor.update(x, by, z, blockState);
-                                    worldSurface.update(x, by, z, blockState);
+                                if (blockState.hasBlockEntity()) {
+                                    BlockEntity blockEntity = chunk.getBlockEntity(blockPos, LevelChunk.EntityCreationType.CHECK);
 
-                                    if (false) { // Full update
-                                        old.onRemove(world, blockPos, blockState, false);
-
-                                        if (sectionStates.get(x, y, z).is(block)) {
-                                            blockState.onPlace(world, blockPos, old, false);
+                                    if (blockEntity == null) {
+                                        // There isn't a block entity here, create it!
+                                        blockEntity = ((EntityBlock)block).newBlockEntity(blockPos, blockState);
+                                        if (blockEntity != null) {
+                                            chunk.addAndRegisterBlockEntity(blockEntity);
                                         }
-                                    }
+                                    } else if (blockEntity.getType().isValid(blockState)) {
+                                        // Block entity is here and the type is correct
+                                        blockEntity.setBlockState(blockState);
 
-                                    if (blockState.hasBlockEntity()) {
-                                        BlockEntity blockEntity = chunk.getBlockEntity(blockPos, LevelChunk.EntityCreationType.CHECK);
-
-                                        if (blockEntity == null) {
-                                            // There isn't a block entity here, create it!
-                                            blockEntity = ((EntityBlock)block).newBlockEntity(blockPos, blockState);
-                                            if (blockEntity != null) {
-                                                chunk.addAndRegisterBlockEntity(blockEntity);
-                                            }
-                                        } else if (blockEntity.getType().isValid(blockState)) {
-                                            // Block entity is here and the type is correct
-                                            blockEntity.setBlockState(blockState);
-
-                                            try {
-                                                this.updateBlockEntityTicker.invoke(chunk, blockEntity);
-                                            } catch (IllegalAccessException | InvocationTargetException e) {
-                                                throw new RuntimeException(e);
-                                            }
-                                        } else {
-                                            // Block entity type isn't correct, we need to recreate it
-                                            chunk.removeBlockEntity(blockPos);
-
-                                            blockEntity = ((EntityBlock)block).newBlockEntity(blockPos, blockState);
-                                            if (blockEntity != null) {
-                                                chunk.addAndRegisterBlockEntity(blockEntity);
-                                            }
+                                        try {
+                                            this.updateBlockEntityTicker.invoke(chunk, blockEntity);
+                                        } catch (IllegalAccessException | InvocationTargetException e) {
+                                            throw new RuntimeException(e);
                                         }
-                                        if (blockEntity != null && blockEntityChunkMap != null) {
-                                            int key = x | (y << 4) | (z << 8);
-                                            CompressedBlockEntity savedBlockEntity = blockEntityChunkMap.get((short) key);
-                                            if (savedBlockEntity != null) {
-                                                blockEntity.load(savedBlockEntity.decompress());
-                                            }
-                                        }
-                                    } else if (old.hasBlockEntity()) {
+                                    } else {
+                                        // Block entity type isn't correct, we need to recreate it
                                         chunk.removeBlockEntity(blockPos);
-                                    }
 
-                                    world.getChunkSource().blockChanged(blockPos); // todo: maybe simply resend chunk instead of this?
-
-                                    if (LightEngine.hasDifferentLightProperties(chunk, blockPos, old, blockState)) {
-                                        lightEngine.checkBlock(blockPos);
+                                        blockEntity = ((EntityBlock)block).newBlockEntity(blockPos, blockState);
+                                        if (blockEntity != null) {
+                                            chunk.addAndRegisterBlockEntity(blockEntity);
+                                        }
                                     }
+                                    if (blockEntity != null && blockEntityChunkMap != null) {
+                                        int key = x | (y << 4) | (z << 8);
+                                        CompressedBlockEntity savedBlockEntity = blockEntityChunkMap.get((short) key);
+                                        if (savedBlockEntity != null) {
+                                            blockEntity.load(savedBlockEntity.decompress());
+                                        }
+                                    }
+                                } else if (old.hasBlockEntity()) {
+                                    chunk.removeBlockEntity(blockPos);
+                                }
+
+                                world.getChunkSource().blockChanged(blockPos); // todo: maybe simply resend chunk instead of this?
+
+                                if (LightEngine.hasDifferentLightProperties(chunk, blockPos, old, blockState)) {
+                                    lightEngine.checkBlock(blockPos);
                                 }
                             }
                         }
                     }
-                } finally {
-                    sectionStates.release();
                 }
 
                 boolean nowHasOnlyAir = section.hasOnlyAir();
