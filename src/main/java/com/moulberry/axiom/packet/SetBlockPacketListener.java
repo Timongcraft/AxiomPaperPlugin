@@ -9,7 +9,6 @@ import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionHand;
-import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.EntityBlock;
 import net.minecraft.world.level.block.entity.BlockEntity;
@@ -23,8 +22,10 @@ import org.bukkit.Bukkit;
 import org.bukkit.block.BlockFace;
 import org.bukkit.craftbukkit.v1_20_R1.block.CraftBlock;
 import org.bukkit.craftbukkit.v1_20_R1.entity.CraftPlayer;
+import org.bukkit.craftbukkit.v1_20_R1.event.CraftEventFactory;
 import org.bukkit.entity.Player;
 import org.bukkit.event.block.Action;
+import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.plugin.messaging.PluginMessageListener;
 import org.jetbrains.annotations.NotNull;
@@ -33,7 +34,6 @@ import xyz.jpenilla.reflectionremapper.ReflectionRemapper;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.Map;
-import java.util.logging.Level;
 
 public class SetBlockPacketListener implements PluginMessageListener {
 
@@ -56,10 +56,8 @@ public class SetBlockPacketListener implements PluginMessageListener {
     }
 
     @Override
-    public void onPluginMessageReceived(@NotNull String channel, @NotNull Player bukkitPlayer, @NotNull byte[] message) {
-        if (!bukkitPlayer.hasPermission("axiom.*")) {
-            return;
-        }
+    public void onPluginMessageReceived(@NotNull String channel, @NotNull Player bukkitPlayer, byte[] message) {
+        if (!bukkitPlayer.hasPermission("axiom.*")) return;
 
         // Check if player is allowed to modify this world
         AxiomModifyWorldEvent modifyWorldEvent = new AxiomModifyWorldEvent(bukkitPlayer, bukkitPlayer.getWorld());
@@ -77,7 +75,9 @@ public class SetBlockPacketListener implements PluginMessageListener {
         InteractionHand hand = friendlyByteBuf.readEnum(InteractionHand.class);
         int sequenceId = friendlyByteBuf.readVarInt();
 
-        ServerPlayer player = ((CraftPlayer)bukkitPlayer).getHandle();
+        ServerPlayer player = ((CraftPlayer) bukkitPlayer).getHandle();
+
+        Action interactAction = breaking ? Action.LEFT_CLICK_BLOCK : Action.RIGHT_CLICK_BLOCK;
 
         org.bukkit.inventory.ItemStack heldItem;
         if (hand == InteractionHand.MAIN_HAND) {
@@ -87,21 +87,32 @@ public class SetBlockPacketListener implements PluginMessageListener {
         }
 
         org.bukkit.block.Block blockClicked = bukkitPlayer.getWorld().getBlockAt(blockHit.getBlockPos().getX(),
-            blockHit.getBlockPos().getY(), blockHit.getBlockPos().getZ());
+                blockHit.getBlockPos().getY(), blockHit.getBlockPos().getZ());
 
         BlockFace blockFace = CraftBlock.notchToBlockFace(blockHit.getDirection());
 
         // Call interact event
-        PlayerInteractEvent playerInteractEvent = new PlayerInteractEvent(bukkitPlayer,
-            breaking ? Action.LEFT_CLICK_BLOCK : Action.RIGHT_CLICK_BLOCK, heldItem, blockClicked, blockFace);
-        if (!playerInteractEvent.callEvent()) {
-            if (sequenceId >= 0) {
-                player.connection.ackBlockChangesUpTo(sequenceId);
+        if (new PlayerInteractEvent(bukkitPlayer, interactAction, heldItem, blockClicked, blockFace).callEvent()) {
+            updateBlocks(player, updateNeighbors, blocks);
+
+            org.bukkit.block.Block bukkitBlock = bukkitPlayer.getWorld().getBlockAt(blockClicked.getX(), blockClicked.getY(), blockClicked.getZ());
+
+            boolean cancelled;
+            if (interactAction.isLeftClick()) {
+                cancelled = !new BlockBreakEvent(bukkitBlock, bukkitPlayer).callEvent();
+            } else {
+                cancelled = CraftEventFactory.callBlockPlaceEvent(player.serverLevel(), player, player.getUsedItemHand(), bukkitBlock.getState(), blockClicked.getX(), blockClicked.getY(), blockClicked.getZ()).isCancelled();
             }
-            return;
+
+            if (cancelled)
+                updateBlocks(player, updateNeighbors, blocks);
         }
 
-        // Update blocks
+        if (sequenceId >= 0)
+            player.connection.ackBlockChangesUpTo(sequenceId);
+    }
+
+    private void updateBlocks(ServerPlayer player, boolean updateNeighbors, Map<BlockPos, BlockState> blocks) {
         if (updateNeighbors) {
             for (Map.Entry<BlockPos, BlockState> entry : blocks.entrySet()) {
                 player.level().setBlock(entry.getKey(), entry.getValue(), 3);
@@ -138,7 +149,8 @@ public class SetBlockPacketListener implements PluginMessageListener {
                         case OCEAN_FLOOR -> oceanFloor = heightmap.getValue();
                         case MOTION_BLOCKING -> motionBlocking = heightmap.getValue();
                         case MOTION_BLOCKING_NO_LEAVES -> motionBlockingNoLeaves = heightmap.getValue();
-                        default -> {}
+                        default -> {
+                        }
                     }
                 }
 
@@ -155,7 +167,7 @@ public class SetBlockPacketListener implements PluginMessageListener {
 
                         if (blockEntity == null) {
                             // There isn't a block entity here, create it!
-                            blockEntity = ((EntityBlock)block).newBlockEntity(blockPos, blockState);
+                            blockEntity = ((EntityBlock) block).newBlockEntity(blockPos, blockState);
                             if (blockEntity != null) {
                                 chunk.addAndRegisterBlockEntity(blockEntity);
                             }
@@ -173,7 +185,7 @@ public class SetBlockPacketListener implements PluginMessageListener {
                             // Block entity type isn't correct, we need to recreate it
                             chunk.removeBlockEntity(blockPos);
 
-                            blockEntity = ((EntityBlock)block).newBlockEntity(blockPos, blockState);
+                            blockEntity = ((EntityBlock) block).newBlockEntity(blockPos, blockState);
                             if (blockEntity != null) {
                                 chunk.addAndRegisterBlockEntity(blockEntity);
                             }
@@ -193,10 +205,6 @@ public class SetBlockPacketListener implements PluginMessageListener {
                     level.getChunkSource().getLightEngine().updateSectionStatus(SectionPos.of(cx, cy, cz), nowHasOnlyAir);
                 }
             }
-        }
-
-        if (sequenceId >= 0) {
-            player.connection.ackBlockChangesUpTo(sequenceId);
         }
     }
 
