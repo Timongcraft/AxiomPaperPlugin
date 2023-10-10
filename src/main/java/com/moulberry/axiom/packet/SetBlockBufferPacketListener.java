@@ -35,6 +35,8 @@ import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.entity.ai.village.poi.PoiType;
+import net.minecraft.world.entity.ai.village.poi.PoiTypes;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.biome.Biome;
@@ -50,12 +52,6 @@ import net.minecraft.world.level.chunk.PalettedContainer;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.lighting.LightEngine;
 import org.bukkit.Bukkit;
-import org.bukkit.NamespacedKey;
-import org.bukkit.craftbukkit.v1_20_R1.CraftWorld;
-import org.bukkit.craftbukkit.v1_20_R1.entity.CraftPlayer;
-import org.bukkit.entity.Player;
-import org.bukkit.plugin.messaging.PluginMessageListener;
-import org.jetbrains.annotations.NotNull;
 import xyz.jpenilla.reflectionremapper.ReflectionRemapper;
 
 import java.lang.reflect.InvocationTargetException;
@@ -118,7 +114,7 @@ public class SetBlockBufferPacketListener {
             Bukkit.getPluginManager().callEvent(modifyWorldEvent);
             if (modifyWorldEvent.isCancelled()) return;
 
-            RegionProtection regionProtection = new RegionProtection(player.getBukkitEntity(), world.getWorld());
+            // RegionProtection regionProtection = new RegionProtection(player.getBukkitEntity(), world.getWorld());
 
             // Allowed, apply buffer
             BlockPos.MutableBlockPos blockPos = new BlockPos.MutableBlockPos();
@@ -137,7 +133,7 @@ public class SetBlockBufferPacketListener {
                     continue;
                 }
 
-                SectionProtection sectionProtection = regionProtection.getSection(cx, cy, cz);
+//                SectionProtection sectionProtection = regionProtection.getSection(cx, cy, cz);
 //                switch (sectionProtection.getSectionState()) {
 //                    case ALLOW -> sectionProtection = null;
 //                    case DENY -> {
@@ -175,11 +171,11 @@ public class SetBlockBufferPacketListener {
                             BlockState blockState = container.get(x, y, z);
                             if (blockState == emptyState) continue;
 
-                            switch (sectionProtection.getSectionState()) {
-                                case ALLOW -> {}
-                                case DENY -> blockState = Blocks.REDSTONE_BLOCK.defaultBlockState();
-                                case CHECK -> blockState = Blocks.DIAMOND_BLOCK.defaultBlockState();
-                            }
+//                            switch (sectionProtection.getSectionState()) {
+//                                case ALLOW -> {}
+//                                case DENY -> blockState = Blocks.REDSTONE_BLOCK.defaultBlockState();
+//                                case CHECK -> blockState = Blocks.DIAMOND_BLOCK.defaultBlockState();
+//                            }
 
                             int bx = cx*16 + x;
                             int by = cy*16 + y;
@@ -249,10 +245,21 @@ public class SetBlockBufferPacketListener {
                                     chunk.removeBlockEntity(blockPos);
                                 }
 
+                                // Mark block changed
                                 world.getChunkSource().blockChanged(blockPos); // todo: maybe simply resend chunk instead of this?
 
+                                // Update Light
                                 if (LightEngine.hasDifferentLightProperties(chunk, blockPos, old, blockState)) {
+                                    chunk.getSkyLightSources().update(chunk, x, by, z);
                                     lightEngine.checkBlock(blockPos);
+                                }
+
+                                // Update Poi
+                                Optional<Holder<PoiType>> newPoi = PoiTypes.forState(blockState);
+                                Optional<Holder<PoiType>> oldPoi = PoiTypes.forState(old);
+                                if (!Objects.equals(oldPoi, newPoi)) {
+                                    if (oldPoi.isPresent()) world.getPoiManager().remove(blockPos);
+                                    if (newPoi.isPresent()) world.getPoiManager().add(blockPos, newPoi.get());
                                 }
                             }
                         }
