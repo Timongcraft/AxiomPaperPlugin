@@ -1,5 +1,6 @@
 package com.moulberry.axiom.packet;
 
+import com.moulberry.axiom.AxiomPaper;
 import com.moulberry.axiom.event.AxiomGameModeChangeEvent;
 import com.moulberry.axiom.event.AxiomTeleportEvent;
 import io.netty.buffer.Unpooled;
@@ -14,9 +15,14 @@ import org.jetbrains.annotations.NotNull;
 
 public class TeleportPacketListener implements PluginMessageListener {
 
+    private final AxiomPaper plugin;
+    public TeleportPacketListener(AxiomPaper plugin) {
+        this.plugin = plugin;
+    }
+
     @Override
     public void onPluginMessageReceived(@NotNull String channel, @NotNull Player player, @NotNull byte[] message) {
-        if (!player.hasPermission("axiom.*")) {
+        if (!this.plugin.canUseAxiom(player)) {
             return;
         }
 
@@ -31,6 +37,12 @@ public class TeleportPacketListener implements PluginMessageListener {
         NamespacedKey namespacedKey = new NamespacedKey(resourceKey.location().getNamespace(), resourceKey.location().getPath());
         World world = Bukkit.getWorld(namespacedKey);
         if (world == null) return;
+
+        // Prevent teleport based on config value
+        boolean allowTeleportBetweenWorlds = this.plugin.configuration.getBoolean("allow-teleport-between-worlds");
+        if (!allowTeleportBetweenWorlds && world != player.getWorld()) {
+            return;
+        }
 
         // Call event
         AxiomTeleportEvent teleportEvent = new AxiomTeleportEvent(player, new Location(world, x, y, z, yRot, xRot));
