@@ -2,11 +2,8 @@ package com.moulberry.axiom.packet;
 
 import com.google.common.collect.Maps;
 import com.moulberry.axiom.AxiomPaper;
-import com.moulberry.axiom.event.AxiomModifyWorldEvent;
 import com.moulberry.axiom.integration.plotsquared.PlotSquaredIntegration;
 import io.netty.buffer.Unpooled;
-import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
-import net.kyori.adventure.text.Component;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Holder;
 import net.minecraft.core.SectionPos;
@@ -16,7 +13,6 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.ai.village.poi.PoiType;
 import net.minecraft.world.entity.ai.village.poi.PoiTypes;
-import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.EntityBlock;
 import net.minecraft.world.level.block.entity.BlockEntity;
@@ -26,14 +22,15 @@ import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.lighting.LightEngine;
 import net.minecraft.world.phys.BlockHitResult;
-import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.block.BlockFace;
 import org.bukkit.craftbukkit.v1_20_R2.CraftWorld;
 import org.bukkit.craftbukkit.v1_20_R2.block.CraftBlock;
 import org.bukkit.craftbukkit.v1_20_R2.entity.CraftPlayer;
+import org.bukkit.craftbukkit.v1_20_R2.event.CraftEventFactory;
 import org.bukkit.entity.Player;
 import org.bukkit.event.block.Action;
+import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.plugin.messaging.PluginMessageListener;
 import org.jetbrains.annotations.NotNull;
@@ -91,6 +88,8 @@ public class SetBlockPacketListener implements PluginMessageListener {
 
         ServerPlayer player = ((CraftPlayer)bukkitPlayer).getHandle();
 
+        Action interactAction = breaking ? Action.LEFT_CLICK_BLOCK : Action.RIGHT_CLICK_BLOCK;
+
         org.bukkit.inventory.ItemStack heldItem;
         if (hand == InteractionHand.MAIN_HAND) {
             heldItem = bukkitPlayer.getInventory().getItemInMainHand();
@@ -99,20 +98,33 @@ public class SetBlockPacketListener implements PluginMessageListener {
         }
 
         org.bukkit.block.Block blockClicked = bukkitPlayer.getWorld().getBlockAt(blockHit.getBlockPos().getX(),
-            blockHit.getBlockPos().getY(), blockHit.getBlockPos().getZ());
+                blockHit.getBlockPos().getY(), blockHit.getBlockPos().getZ());
 
         BlockFace blockFace = CraftBlock.notchToBlockFace(blockHit.getDirection());
 
         // Call interact event
-        PlayerInteractEvent playerInteractEvent = new PlayerInteractEvent(bukkitPlayer,
-            breaking ? Action.LEFT_CLICK_BLOCK : Action.RIGHT_CLICK_BLOCK, heldItem, blockClicked, blockFace);
-        if (!playerInteractEvent.callEvent()) {
-            if (sequenceId >= 0) {
-                player.connection.ackBlockChangesUpTo(sequenceId);
+        if (new PlayerInteractEvent(bukkitPlayer, interactAction, heldItem, blockClicked, blockFace).callEvent()) {
+            updateBlocks(player, bukkitPlayer, updateNeighbors, blocks);
+
+            org.bukkit.block.Block bukkitBlock = bukkitPlayer.getWorld().getBlockAt(blockClicked.getX(), blockClicked.getY(), blockClicked.getZ());
+
+            boolean cancelled;
+            if (interactAction.isLeftClick()) {
+                cancelled = !new BlockBreakEvent(bukkitBlock, bukkitPlayer).callEvent();
+            } else {
+                cancelled = CraftEventFactory.callBlockPlaceEvent(player.serverLevel(), player, player.getUsedItemHand(), bukkitBlock.getState(), blockClicked.getX(), blockClicked.getY(), blockClicked.getZ()).isCancelled();
             }
-            return;
+
+            if (cancelled)
+                updateBlocks(player, bukkitPlayer, updateNeighbors, blocks);
         }
 
+        if (sequenceId >= 0) {
+            player.connection.ackBlockChangesUpTo(sequenceId);
+        }
+    }
+
+    private void updateBlocks(ServerPlayer player, Player bukkitPlayer, boolean updateNeighbors, Map<BlockPos, BlockState> blocks) {
         CraftWorld world = player.level().getWorld();
 
         // Update blocks
@@ -250,10 +262,6 @@ public class SetBlockPacketListener implements PluginMessageListener {
                     level.getChunkSource().getLightEngine().updateSectionStatus(SectionPos.of(cx, cy, cz), nowHasOnlyAir);
                 }
             }
-        }
-
-        if (sequenceId >= 0) {
-            player.connection.ackBlockChangesUpTo(sequenceId);
         }
     }
 
