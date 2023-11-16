@@ -3,6 +3,7 @@ package com.moulberry.axiom.packet;
 import com.moulberry.axiom.AxiomPaper;
 import com.moulberry.axiom.event.AxiomModifyWorldEvent;
 import com.moulberry.axiom.event.AxiomTimeChangeEvent;
+import com.moulberry.axiom.integration.plotsquared.PlotSquaredIntegration;
 import io.netty.buffer.Unpooled;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.network.FriendlyByteBuf;
@@ -40,9 +41,14 @@ public class SetTimePacketListener implements PluginMessageListener {
         if (!level.dimension().equals(key)) return;
 
         // Call modify world
-        AxiomModifyWorldEvent modifyWorldEvent = new AxiomModifyWorldEvent(player, player.getWorld());
-        Bukkit.getPluginManager().callEvent(modifyWorldEvent);
-        if (modifyWorldEvent.isCancelled()) return;
+        if (!this.plugin.canModifyWorld(player, player.getWorld())) {
+            return;
+        }
+
+        // Don't allow on plot worlds
+        if (PlotSquaredIntegration.isPlotWorld(player.getWorld())) {
+            return;
+        }
 
         // Call time change event
         AxiomTimeChangeEvent timeChangeEvent = new AxiomTimeChangeEvent(player, time, freezeTime);

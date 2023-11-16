@@ -6,6 +6,8 @@ import com.moulberry.axiom.buffer.BiomeBuffer;
 import com.moulberry.axiom.buffer.BlockBuffer;
 import com.moulberry.axiom.buffer.CompressedBlockEntity;
 import com.moulberry.axiom.event.AxiomModifyWorldEvent;
+import com.moulberry.axiom.integration.SectionPermissionChecker;
+import com.moulberry.axiom.integration.plotsquared.PlotSquaredIntegration;
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
 import it.unimi.dsi.fastutil.shorts.Short2ObjectMap;
 import net.minecraft.core.BlockPos;
@@ -35,6 +37,7 @@ import net.minecraft.world.level.chunk.PalettedContainer;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.lighting.LightEngine;
 import org.bukkit.Bukkit;
+import org.bukkit.Location;
 import xyz.jpenilla.reflectionremapper.ReflectionRemapper;
 
 import java.lang.reflect.InvocationTargetException;
@@ -89,17 +92,16 @@ public class SetBlockBufferPacketListener {
 
     private void applyBlockBuffer(ServerPlayer player, MinecraftServer server, BlockBuffer buffer, ResourceKey<Level> worldKey) {
         server.execute(() -> {
-            ServerLevel world = server.getLevel(worldKey);
-            if (world == null) return;
+            ServerLevel world = player.serverLevel();
+            if (!world.dimension().equals(worldKey)) return;
 
             if (!this.plugin.canUseAxiom(player.getBukkitEntity())) {
                 return;
             }
 
-            // Call AxiomModifyWorldEvent event
-            AxiomModifyWorldEvent modifyWorldEvent = new AxiomModifyWorldEvent(player.getBukkitEntity(), world.getWorld());
-            Bukkit.getPluginManager().callEvent(modifyWorldEvent);
-            if (modifyWorldEvent.isCancelled()) return;
+            if (!this.plugin.canModifyWorld(player.getBukkitEntity(), world.getWorld())) {
+                return;
+            }
 
             // Allowed, apply buffer
             BlockPos.MutableBlockPos blockPos = new BlockPos.MutableBlockPos();
@@ -114,6 +116,11 @@ public class SetBlockBufferPacketListener {
                 PalettedContainer<BlockState> container = entry.getValue();
 
                 if (cy < world.getMinSection() || cy >= world.getMaxSection()) {
+                    continue;
+                }
+
+                SectionPermissionChecker checker = PlotSquaredIntegration.checkSection(player.getBukkitEntity(), world.getWorld(), cx, cy, cz);
+                if (checker != null && checker.noneAllowed()) {
                     continue;
                 }
 
@@ -145,9 +152,28 @@ public class SetBlockBufferPacketListener {
 
                 Short2ObjectMap<CompressedBlockEntity> blockEntityChunkMap = buffer.getBlockEntityChunkMap(entry.getLongKey());
 
-                for (int x = 0; x < 16; x++) {
-                    for (int y = 0; y < 16; y++) {
-                        for (int z = 0; z < 16; z++) {
+                int minX = 0;
+                int minY = 0;
+                int minZ = 0;
+                int maxX = 15;
+                int maxY = 15;
+                int maxZ = 15;
+
+                if (checker != null) {
+                    minX = checker.bounds().minX();
+                    minY = checker.bounds().minY();
+                    minZ = checker.bounds().minZ();
+                    maxX = checker.bounds().maxX();
+                    maxY = checker.bounds().maxY();
+                    maxZ = checker.bounds().maxZ();
+                    if (checker.allAllowed()) {
+                        checker = null;
+                    }
+                }
+
+                for (int x = minX; x <= maxX; x++) {
+                    for (int y = minY; y <= maxY; y++) {
+                        for (int z = minZ; z <= maxZ; z++) {
                             BlockState blockState = container.get(x, y, z);
                             if (blockState == emptyState) continue;
 
@@ -158,6 +184,8 @@ public class SetBlockBufferPacketListener {
                             if (hasOnlyAir && blockState.isAir()) {
                                 continue;
                             }
+
+                            if (checker != null && !checker.allowed(x, y, z)) continue;
 
                             BlockState old = section.setBlockState(x, y, z, blockState, true);
                             if (blockState != old) {
@@ -250,17 +278,16 @@ public class SetBlockBufferPacketListener {
 
     private void applyBiomeBuffer(ServerPlayer player, MinecraftServer server, BiomeBuffer biomeBuffer, ResourceKey<Level> worldKey) {
         server.execute(() -> {
-            ServerLevel world = server.getLevel(worldKey);
-            if (world == null) return;
+            ServerLevel world = player.serverLevel();
+            if (!world.dimension().equals(worldKey)) return;
 
             if (!this.plugin.canUseAxiom(player.getBukkitEntity())) {
                 return;
             }
 
-            // Call AxiomModifyWorldEvent event
-            AxiomModifyWorldEvent modifyWorldEvent = new AxiomModifyWorldEvent(player.getBukkitEntity(), world.getWorld());
-            Bukkit.getPluginManager().callEvent(modifyWorldEvent);
-            if (modifyWorldEvent.isCancelled()) return;
+            if (!this.plugin.canModifyWorld(player.getBukkitEntity(), world.getWorld())) {
+                return;
+            }
 
             Set<LevelChunk> changedChunks = new HashSet<>();
 
@@ -286,6 +313,9 @@ public class SetBlockBufferPacketListener {
 
                 var holder = registry.getHolder(biome);
                 if (holder.isPresent()) {
+                    if (!PlotSquaredIntegration.canPlaceBlock(player.getBukkitEntity(),
+                            new Location(player.getBukkitEntity().getWorld(), x+1, y+1, z+1))) return;
+
                     container.set(x & 3, y & 3, z & 3, holder.get());
                     changedChunks.add(chunk);
                 }

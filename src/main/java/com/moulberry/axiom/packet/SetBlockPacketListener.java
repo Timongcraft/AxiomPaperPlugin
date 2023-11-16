@@ -1,8 +1,12 @@
 package com.moulberry.axiom.packet;
 
+import com.google.common.collect.Maps;
 import com.moulberry.axiom.AxiomPaper;
 import com.moulberry.axiom.event.AxiomModifyWorldEvent;
+import com.moulberry.axiom.integration.plotsquared.PlotSquaredIntegration;
 import io.netty.buffer.Unpooled;
+import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
+import net.kyori.adventure.text.Component;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Holder;
 import net.minecraft.core.SectionPos;
@@ -23,13 +27,13 @@ import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.lighting.LightEngine;
 import net.minecraft.world.phys.BlockHitResult;
 import org.bukkit.Bukkit;
+import org.bukkit.Location;
 import org.bukkit.block.BlockFace;
+import org.bukkit.craftbukkit.v1_20_R2.CraftWorld;
 import org.bukkit.craftbukkit.v1_20_R2.block.CraftBlock;
 import org.bukkit.craftbukkit.v1_20_R2.entity.CraftPlayer;
-import org.bukkit.craftbukkit.v1_20_R2.event.CraftEventFactory;
 import org.bukkit.entity.Player;
 import org.bukkit.event.block.Action;
-import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.plugin.messaging.PluginMessageListener;
 import org.jetbrains.annotations.NotNull;
@@ -40,6 +44,7 @@ import java.lang.reflect.Method;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.function.IntFunction;
 
 public class SetBlockPacketListener implements PluginMessageListener {
 
@@ -67,14 +72,15 @@ public class SetBlockPacketListener implements PluginMessageListener {
             return;
         }
 
-        // Check if player is allowed to modify this world
-        AxiomModifyWorldEvent modifyWorldEvent = new AxiomModifyWorldEvent(bukkitPlayer, bukkitPlayer.getWorld());
-        Bukkit.getPluginManager().callEvent(modifyWorldEvent);
-        if (modifyWorldEvent.isCancelled()) return;
+        if (!this.plugin.canModifyWorld(bukkitPlayer, bukkitPlayer.getWorld())) {
+            return;
+        }
 
         // Read packet
         FriendlyByteBuf friendlyByteBuf = new FriendlyByteBuf(Unpooled.wrappedBuffer(message));
-        Map<BlockPos, BlockState> blocks = friendlyByteBuf.readMap(FriendlyByteBuf::readBlockPos, buf -> buf.readById(Block.BLOCK_STATE_REGISTRY));
+        IntFunction<Map<BlockPos, BlockState>> mapFunction = FriendlyByteBuf.limitValue(Maps::newLinkedHashMapWithExpectedSize, 512);
+        Map<BlockPos, BlockState> blocks = friendlyByteBuf.readMap(mapFunction,
+                FriendlyByteBuf::readBlockPos, buf -> buf.readById(Block.BLOCK_STATE_REGISTRY));
         boolean updateNeighbors = friendlyByteBuf.readBoolean();
 
         int reason = friendlyByteBuf.readVarInt();
@@ -85,8 +91,6 @@ public class SetBlockPacketListener implements PluginMessageListener {
 
         ServerPlayer player = ((CraftPlayer)bukkitPlayer).getHandle();
 
-        Action interactAction = breaking ? Action.LEFT_CLICK_BLOCK : Action.RIGHT_CLICK_BLOCK;
-
         org.bukkit.inventory.ItemStack heldItem;
         if (hand == InteractionHand.MAIN_HAND) {
             heldItem = bukkitPlayer.getInventory().getItemInMainHand();
@@ -95,42 +99,61 @@ public class SetBlockPacketListener implements PluginMessageListener {
         }
 
         org.bukkit.block.Block blockClicked = bukkitPlayer.getWorld().getBlockAt(blockHit.getBlockPos().getX(),
-                blockHit.getBlockPos().getY(), blockHit.getBlockPos().getZ());
+            blockHit.getBlockPos().getY(), blockHit.getBlockPos().getZ());
 
         BlockFace blockFace = CraftBlock.notchToBlockFace(blockHit.getDirection());
 
         // Call interact event
-        if (new PlayerInteractEvent(bukkitPlayer, interactAction, heldItem, blockClicked, blockFace).callEvent()) {
-            updateBlocks(player, updateNeighbors, blocks);
-
-            org.bukkit.block.Block bukkitBlock = bukkitPlayer.getWorld().getBlockAt(blockClicked.getX(), blockClicked.getY(), blockClicked.getZ());
-
-            boolean cancelled;
-            if (interactAction.isLeftClick()) {
-                cancelled = !new BlockBreakEvent(bukkitBlock, bukkitPlayer).callEvent();
-            } else {
-                cancelled = CraftEventFactory.callBlockPlaceEvent(player.serverLevel(), player, player.getUsedItemHand(), bukkitBlock.getState(), blockClicked.getX(), blockClicked.getY(), blockClicked.getZ()).isCancelled();
+        PlayerInteractEvent playerInteractEvent = new PlayerInteractEvent(bukkitPlayer,
+            breaking ? Action.LEFT_CLICK_BLOCK : Action.RIGHT_CLICK_BLOCK, heldItem, blockClicked, blockFace);
+        if (!playerInteractEvent.callEvent()) {
+            if (sequenceId >= 0) {
+                player.connection.ackBlockChangesUpTo(sequenceId);
             }
-
-            if (cancelled)
-                updateBlocks(player, updateNeighbors, blocks);
+            return;
         }
 
-        if (sequenceId >= 0) {
-            player.connection.ackBlockChangesUpTo(sequenceId);
-        }
-    }
+        CraftWorld world = player.level().getWorld();
 
-    private void updateBlocks(ServerPlayer player, boolean updateNeighbors, Map<BlockPos, BlockState> blocks) {
+        // Update blocks
         if (updateNeighbors) {
+            int count = 0;
             for (Map.Entry<BlockPos, BlockState> entry : blocks.entrySet()) {
-                player.level().setBlock(entry.getKey(), entry.getValue(), 3);
-            }
-        } else {
-            for (Map.Entry<BlockPos, BlockState> entry : blocks.entrySet()) {
+                if (count++ > 64) break;
+
                 BlockPos blockPos = entry.getKey();
                 BlockState blockState = entry.getValue();
 
+                // Check PlotSquared
+                if (blockState.isAir()) {
+                    if (!PlotSquaredIntegration.canBreakBlock(bukkitPlayer, world.getBlockAt(blockPos.getX(), blockPos.getY(), blockPos.getZ()))) {
+                        continue;
+                    }
+                } else if (!PlotSquaredIntegration.canPlaceBlock(bukkitPlayer, new Location(world, blockPos.getX(), blockPos.getY(), blockPos.getZ()))) {
+                    continue;
+                }
+
+                // Place block
+                player.level().setBlock(blockPos, blockState, 3);
+            }
+        } else {
+            int count = 0;
+            for (Map.Entry<BlockPos, BlockState> entry : blocks.entrySet()) {
+                if (count++ > 64) break;
+
+                BlockPos blockPos = entry.getKey();
+                BlockState blockState = entry.getValue();
+
+                // Check PlotSquared
+                if (blockState.isAir()) {
+                    if (!PlotSquaredIntegration.canBreakBlock(bukkitPlayer, world.getBlockAt(blockPos.getX(), blockPos.getY(), blockPos.getZ()))) {
+                        continue;
+                    }
+                } else if (!PlotSquaredIntegration.canPlaceBlock(bukkitPlayer, new Location(world, blockPos.getX(), blockPos.getY(), blockPos.getZ()))) {
+                    continue;
+                }
+
+                // Place block
                 int bx = blockPos.getX();
                 int by = blockPos.getY();
                 int bz = blockPos.getZ();
@@ -227,6 +250,10 @@ public class SetBlockPacketListener implements PluginMessageListener {
                     level.getChunkSource().getLightEngine().updateSectionStatus(SectionPos.of(cx, cy, cz), nowHasOnlyAir);
                 }
             }
+        }
+
+        if (sequenceId >= 0) {
+            player.connection.ackBlockChangesUpTo(sequenceId);
         }
     }
 

@@ -8,7 +8,7 @@ plugins {
 }
 
 group = "com.moulberry.axiom"
-version = "1.5.2.1"
+version = "1.5.5"
 description = "Serverside component for Axiom on Paper"
 
 java {
@@ -25,7 +25,7 @@ repositories {
 }
 
 dependencies {
-    paperweight.paperDevBundle("1.20.2-R0.1-20231010.011415-29")
+    paperweight.paperDevBundle("1.20.2-R0.1-SNAPSHOT")
     implementation("xyz.jpenilla:reflection-remapper:0.1.0-SNAPSHOT")
 
     // Zstd Compression Library
