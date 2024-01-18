@@ -140,8 +140,6 @@ public class SetBlockPacketListener implements PluginMessageListener {
             return;
         }
 
-
-
         if (sequenceId >= 0) {
             player.connection.ackBlockChangesUpTo(sequenceId);
         }
