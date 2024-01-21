@@ -1,6 +1,7 @@
 package com.moulberry.axiom.packet;
 
 import com.moulberry.axiom.AxiomPaper;
+import com.moulberry.axiom.NbtSanitization;
 import io.netty.buffer.Unpooled;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -104,6 +105,8 @@ public class ManipulateEntityPacketListener implements PluginMessageListener {
             if (blacklistedEntities.contains(type)) continue;
 
             if (entry.merge != null && !entry.merge.isEmpty()) {
+                NbtSanitization.sanitizeEntity(entry.merge);
+
                 CompoundTag compoundTag = entity.saveWithoutId(new CompoundTag());
                 compoundTag = merge(compoundTag, entry.merge);
                 entity.load(compoundTag);
@@ -176,6 +179,11 @@ public class ManipulateEntityPacketListener implements PluginMessageListener {
     }
 
     private static CompoundTag merge(CompoundTag left, CompoundTag right) {
+        if (right.contains("axiom:modify")) {
+            right.remove("axiom:modify");
+            return right;
+        }
+
         for (String key : right.getAllKeys()) {
             Tag tag = right.get(key);
             if (tag instanceof CompoundTag compound) {
@@ -183,9 +191,14 @@ public class ManipulateEntityPacketListener implements PluginMessageListener {
                     left.remove(key);
                 } else if (left.contains(key, Tag.TAG_COMPOUND)) {
                     CompoundTag child = left.getCompound(key);
-                    merge(child, compound);
+                    child = merge(child, compound);
+                    left.put(key, child);
                 } else {
-                    left.put(key, tag.copy());
+                    CompoundTag copied = compound.copy();
+                    if (copied.contains("axiom:modify")) {
+                        copied.remove("axiom:modify");
+                    }
+                    left.put(key, copied);
                 }
             } else {
                 left.put(key, tag.copy());
