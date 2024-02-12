@@ -15,20 +15,39 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.UUID;
 
-public record MarkerData(UUID uuid, Vec3 position, @Nullable String name, @Nullable Vec3 minRegion, @Nullable Vec3 maxRegion) {
+public record MarkerData(UUID uuid, Vec3 position, @Nullable String name, @Nullable Vec3 minRegion, @Nullable Vec3 maxRegion,
+                         int lineArgb, float lineThickness, int faceArgb) {
     public static MarkerData read(FriendlyByteBuf friendlyByteBuf) {
         UUID uuid = friendlyByteBuf.readUUID();
-        Vec3 position = new Vec3(friendlyByteBuf.readDouble(), friendlyByteBuf.readDouble(), friendlyByteBuf.readDouble());
+        Vec3 position = friendlyByteBuf.readVec3();
         String name = friendlyByteBuf.readNullable(FriendlyByteBuf::readUtf);
 
         Vec3 minRegion = null;
         Vec3 maxRegion = null;
-        if (friendlyByteBuf.readBoolean()) {
-            minRegion = new Vec3(friendlyByteBuf.readDouble(), friendlyByteBuf.readDouble(), friendlyByteBuf.readDouble());
-            maxRegion = new Vec3(friendlyByteBuf.readDouble(), friendlyByteBuf.readDouble(), friendlyByteBuf.readDouble());
+        int lineArgb = 0;
+        float lineThickness = 0;
+        int faceArgb = 0;
+
+        byte flags = friendlyByteBuf.readByte();
+
+        if (flags != 0) {
+            minRegion = friendlyByteBuf.readVec3();
+            maxRegion = friendlyByteBuf.readVec3();
+
+            if ((flags & 2) != 0) {
+                lineArgb = friendlyByteBuf.readInt();
+            }
+
+            if ((flags & 4) != 0) {
+                lineThickness = friendlyByteBuf.readFloat();
+            }
+
+            if ((flags & 8) != 0) {
+                faceArgb = friendlyByteBuf.readInt();
+            }
         }
 
-        return new MarkerData(uuid, position, name, minRegion, maxRegion);
+        return new MarkerData(uuid, position, name, minRegion, maxRegion, lineArgb, lineThickness, faceArgb);
     }
 
     public static void write(FriendlyByteBuf friendlyByteBuf, MarkerData markerData) {
@@ -39,15 +58,32 @@ public record MarkerData(UUID uuid, Vec3 position, @Nullable String name, @Nulla
         friendlyByteBuf.writeNullable(markerData.name, FriendlyByteBuf::writeUtf);
 
         if (markerData.minRegion != null && markerData.maxRegion != null) {
-            friendlyByteBuf.writeBoolean(true);
+            byte flags = 1;
+            if (markerData.lineArgb != 0) flags |= 2;
+            if (markerData.lineThickness != 0) flags |= 4;
+            if (markerData.faceArgb != 0) flags |= 8;
+            friendlyByteBuf.writeByte(flags);
+
             friendlyByteBuf.writeDouble(markerData.minRegion.x);
             friendlyByteBuf.writeDouble(markerData.minRegion.y);
             friendlyByteBuf.writeDouble(markerData.minRegion.z);
             friendlyByteBuf.writeDouble(markerData.maxRegion.x);
             friendlyByteBuf.writeDouble(markerData.maxRegion.y);
             friendlyByteBuf.writeDouble(markerData.maxRegion.z);
+
+            if (markerData.lineArgb != 0) {
+                friendlyByteBuf.writeInt(markerData.lineArgb);
+            }
+
+            if (markerData.lineArgb != 0) {
+                friendlyByteBuf.writeFloat(markerData.lineThickness);
+            }
+
+            if (markerData.faceArgb != 0) {
+                friendlyByteBuf.writeInt(markerData.faceArgb);
+            }
         } else {
-            friendlyByteBuf.writeBoolean(false);
+            friendlyByteBuf.writeByte(0);
         }
     }
 
@@ -83,6 +119,10 @@ public record MarkerData(UUID uuid, Vec3 position, @Nullable String name, @Nulla
 
         Vec3 minRegion = null;
         Vec3 maxRegion = null;
+        int lineArgb = 0;
+        float lineThickness = 0;
+        int faceArgb = 0;
+
         if (data.contains("min", Tag.TAG_LIST) && data.contains("max", Tag.TAG_LIST)) {
             ListTag min = data.getList("min", Tag.TAG_DOUBLE);
             ListTag max = data.getList("max", Tag.TAG_DOUBLE);
@@ -96,10 +136,21 @@ public record MarkerData(UUID uuid, Vec3 position, @Nullable String name, @Nulla
                 double maxZ = max.getDouble(2);
                 minRegion = new Vec3(minX, minY, minZ);
                 maxRegion = new Vec3(maxX, maxY, maxZ);
-            }
 
+                if (data.contains("line_argb", Tag.TAG_ANY_NUMERIC)) {
+                    lineArgb = data.getInt("line_argb");
+                }
+
+                if (data.contains("line_thickness", Tag.TAG_ANY_NUMERIC)) {
+                    lineThickness = data.getInt("line_thickness");
+                }
+
+                if (data.contains("face_argb", Tag.TAG_ANY_NUMERIC)) {
+                    faceArgb = data.getInt("face_argb");
+                }
+            }
         }
 
-        return new MarkerData(marker.getUUID(), position, name, minRegion, maxRegion);
+        return new MarkerData(marker.getUUID(), position, name, minRegion, maxRegion, lineArgb, lineThickness, faceArgb);
     }
 }
