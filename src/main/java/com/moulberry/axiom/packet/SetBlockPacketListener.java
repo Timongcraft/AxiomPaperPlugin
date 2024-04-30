@@ -2,11 +2,9 @@ package com.moulberry.axiom.packet;
 
 import com.google.common.collect.Maps;
 import com.moulberry.axiom.AxiomPaper;
-import com.moulberry.axiom.event.AxiomModifyWorldEvent;
+import com.moulberry.axiom.integration.Integration;
 import com.moulberry.axiom.integration.plotsquared.PlotSquaredIntegration;
 import io.netty.buffer.Unpooled;
-import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
-import net.kyori.adventure.text.Component;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Holder;
 import net.minecraft.core.SectionPos;
@@ -19,8 +17,7 @@ import net.minecraft.world.entity.ai.village.poi.PoiTypes;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.context.BlockPlaceContext;
-import net.minecraft.world.level.block.Block;
-import net.minecraft.world.level.block.EntityBlock;
+import net.minecraft.world.level.block.*;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunk;
@@ -28,16 +25,15 @@ import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.lighting.LightEngine;
 import net.minecraft.world.phys.BlockHitResult;
-import org.bukkit.Bukkit;
+import net.minecraft.world.phys.HitResult;
+import net.minecraft.world.phys.Vec3;
 import org.bukkit.Location;
 import org.bukkit.block.BlockFace;
 import org.bukkit.craftbukkit.v1_20_R3.CraftWorld;
 import org.bukkit.craftbukkit.v1_20_R3.block.CraftBlock;
 import org.bukkit.craftbukkit.v1_20_R3.entity.CraftPlayer;
-import org.bukkit.craftbukkit.v1_20_R3.event.CraftEventFactory;
 import org.bukkit.entity.Player;
 import org.bukkit.event.block.Action;
-import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.plugin.messaging.PluginMessageListener;
 import org.jetbrains.annotations.NotNull;
@@ -95,57 +91,35 @@ public class SetBlockPacketListener implements PluginMessageListener {
 
         ServerPlayer player = ((CraftPlayer)bukkitPlayer).getHandle();
 
-        Action interactAction = breaking ? Action.LEFT_CLICK_BLOCK : Action.RIGHT_CLICK_BLOCK;
-
-        org.bukkit.inventory.ItemStack heldItem;
-        if (hand == InteractionHand.MAIN_HAND) {
-            heldItem = bukkitPlayer.getInventory().getItemInMainHand();
-        } else {
-            heldItem = bukkitPlayer.getInventory().getItemInOffHand();
+        if (sequenceId >= 0) {
+            player.connection.ackBlockChangesUpTo(sequenceId);
         }
 
-        org.bukkit.block.Block blockClicked = bukkitPlayer.getWorld().getBlockAt(blockHit.getBlockPos().getX(),
-            blockHit.getBlockPos().getY(), blockHit.getBlockPos().getZ());
+        if (!blockHit.getLocation().equals(Vec3.ZERO)) {
+            org.bukkit.inventory.ItemStack heldItem;
+            if (hand == InteractionHand.MAIN_HAND) {
+                heldItem = bukkitPlayer.getInventory().getItemInMainHand();
+            } else {
+                heldItem = bukkitPlayer.getInventory().getItemInOffHand();
+            }
 
-        BlockFace blockFace = CraftBlock.notchToBlockFace(blockHit.getDirection());
+            org.bukkit.block.Block blockClicked = bukkitPlayer.getWorld().getBlockAt(blockHit.getBlockPos().getX(),
+                    blockHit.getBlockPos().getY(), blockHit.getBlockPos().getZ());
+
+            BlockFace blockFace = CraftBlock.notchToBlockFace(blockHit.getDirection());
+
+            // Call interact event
+            PlayerInteractEvent playerInteractEvent = new PlayerInteractEvent(bukkitPlayer,
+                    breaking ? Action.LEFT_CLICK_BLOCK : Action.RIGHT_CLICK_BLOCK, heldItem, blockClicked, blockFace);
+            if (!playerInteractEvent.callEvent()) {
+                return;
+            }
+        }
 
         CraftWorld world = player.level().getWorld();
 
         BlockPlaceContext blockPlaceContext = new BlockPlaceContext(player, hand, player.getItemInHand(hand), blockHit);
 
-        // Call interact event
-        if (new PlayerInteractEvent(bukkitPlayer, interactAction, heldItem, blockClicked, blockFace).callEvent()) {
-            updateBlocks(player, bukkitPlayer, hand, world, blockPlaceContext, breaking, updateNeighbors, blocks);
-
-            org.bukkit.block.Block bukkitBlock = bukkitPlayer.getWorld().getBlockAt(blockClicked.getX(), blockClicked.getY(), blockClicked.getZ());
-
-            boolean cancelled;
-            if (interactAction.isLeftClick()) {
-                cancelled = !new BlockBreakEvent(bukkitBlock, bukkitPlayer).callEvent();
-            } else {
-                cancelled = CraftEventFactory.callBlockPlaceEvent(player.serverLevel(), player, player.getUsedItemHand(), bukkitBlock.getState(), blockClicked.getX(), blockClicked.getY(), blockClicked.getZ()).isCancelled();
-            }
-
-            if (cancelled)
-                updateBlocks(player, bukkitPlayer, hand, world, blockPlaceContext, breaking, updateNeighbors, blocks);
-        }
-
-        // Call interact event
-        PlayerInteractEvent playerInteractEvent = new PlayerInteractEvent(bukkitPlayer,
-            breaking ? Action.LEFT_CLICK_BLOCK : Action.RIGHT_CLICK_BLOCK, heldItem, blockClicked, blockFace);
-        if (!playerInteractEvent.callEvent()) {
-            if (sequenceId >= 0) {
-                player.connection.ackBlockChangesUpTo(sequenceId);
-            }
-            return;
-        }
-
-        if (sequenceId >= 0) {
-            player.connection.ackBlockChangesUpTo(sequenceId);
-        }
-    }
-
-    private void updateBlocks(ServerPlayer player, Player bukkitPlayer, InteractionHand hand, CraftWorld world, BlockPlaceContext blockPlaceContext, boolean breaking, boolean updateNeighbors, Map<BlockPos, BlockState> blocks) {
         // Update blocks
         if (updateNeighbors) {
             int count = 0;
@@ -155,12 +129,17 @@ public class SetBlockPacketListener implements PluginMessageListener {
                 BlockPos blockPos = entry.getKey();
                 BlockState blockState = entry.getValue();
 
+                // Disallow in unloaded chunks
+                if (!player.level().isLoaded(blockPos)) {
+                    continue;
+                }
+
                 // Check PlotSquared
                 if (blockState.isAir()) {
-                    if (!PlotSquaredIntegration.canBreakBlock(bukkitPlayer, world.getBlockAt(blockPos.getX(), blockPos.getY(), blockPos.getZ()))) {
+                    if (!Integration.canBreakBlock(bukkitPlayer, world.getBlockAt(blockPos.getX(), blockPos.getY(), blockPos.getZ()))) {
                         continue;
                     }
-                } else if (!PlotSquaredIntegration.canPlaceBlock(bukkitPlayer, new Location(world, blockPos.getX(), blockPos.getY(), blockPos.getZ()))) {
+                } else if (!Integration.canPlaceBlock(bukkitPlayer, new Location(world, blockPos.getX(), blockPos.getY(), blockPos.getZ()))) {
                     continue;
                 }
 
@@ -175,12 +154,17 @@ public class SetBlockPacketListener implements PluginMessageListener {
                 BlockPos blockPos = entry.getKey();
                 BlockState blockState = entry.getValue();
 
+                // Disallow in unloaded chunks
+                if (!player.level().isLoaded(blockPos)) {
+                    continue;
+                }
+
                 // Check PlotSquared
                 if (blockState.isAir()) {
-                    if (!PlotSquaredIntegration.canBreakBlock(bukkitPlayer, world.getBlockAt(blockPos.getX(), blockPos.getY(), blockPos.getZ()))) {
+                    if (!Integration.canBreakBlock(bukkitPlayer, world.getBlockAt(blockPos.getX(), blockPos.getY(), blockPos.getZ()))) {
                         continue;
                     }
-                } else if (!PlotSquaredIntegration.canPlaceBlock(bukkitPlayer, new Location(world, blockPos.getX(), blockPos.getY(), blockPos.getZ()))) {
+                } else if (!Integration.canPlaceBlock(bukkitPlayer, new Location(world, blockPos.getX(), blockPos.getY(), blockPos.getZ()))) {
                     continue;
                 }
 
@@ -285,11 +269,32 @@ public class SetBlockPacketListener implements PluginMessageListener {
 
         if (!breaking) {
             BlockPos clickedPos = blockPlaceContext.getClickedPos();
+
+            // Disallow in unloaded chunks
+            if (!player.level().isLoaded(clickedPos)) {
+                return;
+            }
+
+            BlockState desiredBlockState = blocks.get(clickedPos);
+            BlockState actualBlockState = player.level().getBlockState(clickedPos);
+            Block actualBlock = actualBlockState.getBlock();
+
+            // Ensure block is correct
+            if (desiredBlockState == null || desiredBlockState.isAir() || actualBlockState.isAir()) return;
+            if (desiredBlockState.getBlock() != actualBlock) return;
+
+            // Check plot squared
+            if (!Integration.canPlaceBlock(bukkitPlayer, new Location(world, clickedPos.getX(), clickedPos.getY(), clickedPos.getZ()))) {
+                return;
+            }
+
             ItemStack inHand = player.getItemInHand(hand);
-            BlockState blockState = player.level().getBlockState(clickedPos);
 
             BlockItem.updateCustomBlockEntityTag(player.level(), player, clickedPos, inHand);
-            blockState.getBlock().setPlacedBy(player.level(), clickedPos, blockState, player, inHand);
+
+            if (!(actualBlock instanceof BedBlock) && !(actualBlock instanceof DoublePlantBlock) && !(actualBlock instanceof DoorBlock)) {
+                actualBlock.setPlacedBy(player.level(), clickedPos, actualBlockState, player, inHand);
+            }
         }
     }
 
